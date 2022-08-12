@@ -62,3 +62,70 @@ func TestReadAndWriteSlottedPage(t *testing.T) {
 	}
 
 }
+
+func TestDeleteItemAtIndex_AtIndexZero(t *testing.T) {
+
+	dataOne := []string{"something", "fun"}
+	b, _ := json.Marshal(dataOne)
+
+	page, err := NewSlottedPage([][]byte{b})
+	if err != nil {
+		t.Errorf("expected no error")
+	}
+
+	page, err = DeleteItemAtIndex(page, 0)
+
+	result, err := ReadSlottedPage(page)
+	if err != nil {
+		t.Errorf("expected no error")
+	}
+
+	if result.CountItems != 0 {
+		t.Errorf("expected zero item count, as removed only item, got: %d", result.CountItems)
+	}
+
+	if result.Tombstones != 1 {
+		t.Errorf("expected a tombstone count of one as we deleted only item, got: %d", result.Tombstones)
+	}
+}
+
+func TestDeleteItemAtIndex_AtNonZeroIndex(t *testing.T) {
+	dataOne := []byte("hello world")
+	dataTwo := []byte("Привет мир")
+	dataThree := []byte("hola amigo")
+
+	page, err := NewSlottedPage([][]byte{dataOne, dataTwo, dataThree})
+	if err != nil {
+		t.Errorf("expected no error")
+	}
+
+	page, err = DeleteItemAtIndex(page, 1)
+	if err != nil {
+		t.Errorf("expected no error")
+	}
+
+	result, err := ReadSlottedPage(page)
+	if err != nil {
+		t.Errorf("expected no error")
+	}
+
+	if result.CountItems != 2 {
+		t.Errorf("expected two items in page, got: %d", result.CountItems)
+	}
+
+	if result.Tombstones != 1 {
+		t.Errorf("expected one tombstone in page, got: %d", result.Tombstones)
+	}
+
+	if !reflect.DeepEqual(result.Items[0], dataOne) {
+		t.Errorf("unexpected byte value for item one, got :%s", result.Items[0])
+	}
+
+	if !reflect.DeepEqual(result.Items[1], dataThree) {
+		t.Errorf("unexpected byte value for item two, got :%s", result.Items[1])
+	}
+}
+
+func TestDeleteItemAtIndex_NoSuchIndex(t *testing.T) {
+
+}
