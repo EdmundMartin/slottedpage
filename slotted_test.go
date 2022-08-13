@@ -201,3 +201,22 @@ func TestCanWriteValueToExistingPage(t *testing.T) {
 		}
 	}
 }
+
+func TestCanWriteToEmptyPage(t *testing.T) {
+	data := []byte("Omar Little")
+
+	cleanPage := make([]byte, defaultPageSize)
+
+	err := WriteItemToPage(cleanPage, data)
+	if err != nil {
+		t.Error("expected no error")
+	}
+	p, err := ReadSlottedPage(cleanPage)
+	if p.CountItems != 1 {
+		t.Errorf("expected 1 item, got %d item(s)", p.CountItems)
+	}
+
+	if string(p.Items[0]) != "Omar Little" {
+		t.Errorf("Unexpected value returned, expected %s, got %s", "Omar Little", string(p.Items[0]))
+	}
+}

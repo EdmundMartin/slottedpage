@@ -210,24 +210,7 @@ func buildHeaders(items [][]byte) ([]byte, []int, error) {
 	for idx, item := range items {
 		size := len(item)
 		offset := startingIdx - size
-		// Offset
-		err = binary.Write(buffer, binary.BigEndian, uint16(offset))
-		if err != nil {
-			return nil, nil, err
-		}
-		// Can use uint16 here - as maximum possible storage not in a blob - less than uint16
-		err = binary.Write(buffer, binary.BigEndian, uint16(size))
-		if err != nil {
-			return nil, nil, err
-		}
-		// Slot ID - unint32 - as we want to keep slot IDs unique regardless of compaction
-		// Allows a page to be written to 4 billion times
-		err := binary.Write(buffer, binary.BigEndian, uint32(idx))
-		if err != nil {
-			return nil, nil, err
-		}
-		// Represents a tombstone
-		err = binary.Write(buffer, binary.BigEndian, uint8(0))
+		err := writeSlotInfo(buffer, uint16(offset), uint16(size), uint32(idx), 0)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -265,7 +248,7 @@ func DeleteSlotItemByID(page []byte, id int) ([]byte, error) {
 	return page, nil
 }
 
-func UpdateItemWithSlotID(page []byte, idx int) {
+func UpdateItemWithSlotID(page []byte, slotID int, item []byte) {
 	// TODO - Given page bytes and idx update item at idx
 	return
 }
@@ -282,7 +265,7 @@ func WriteItemToPage(page []byte, item []byte) error {
 
 	if itemCount == 0 {
 		pageSize := calculatePageSize([][]byte{item})
-		if pageSize > 4000 {
+		if pageSize > defaultPageSize {
 			// TODO - Lets handle blobs
 			return errors.New("not enough space to write item to page")
 		}
@@ -290,26 +273,7 @@ func WriteItemToPage(page []byte, item []byte) error {
 		size := len(item)
 		idx := defaultPageSize - size
 		copyRecord(0, idx, size, item, page)
-
-		/// TODO - Lets put this into a function
-		/// Offset
-		err = binary.Write(tmpBuffer, binary.BigEndian, uint16(idx))
-		if err != nil {
-			return err
-		}
-		// Can use uint16 here - as maximum possible storage not in a blob - less than uint16
-		err = binary.Write(tmpBuffer, binary.BigEndian, uint16(size))
-		if err != nil {
-			return err
-		}
-		// Slot ID - unint32 - as we want to keep slot IDs unique regardless of compaction
-		// Allows a page to be written to 4 billion times
-		err = binary.Write(tmpBuffer, binary.BigEndian, lastID)
-		if err != nil {
-			return err
-		}
-		// Represents a tombstone
-		err = binary.Write(tmpBuffer, binary.BigEndian, uint8(0))
+		err = writeSlotInfo(tmpBuffer, uint16(idx), uint16(size), lastID, 0)
 		if err != nil {
 			return err
 		}
@@ -336,25 +300,7 @@ func WriteItemToPage(page []byte, item []byte) error {
 	idx := int(finalSlot.offset) - size
 	copyRecord(0, idx, size, item, page)
 
-	/// TODO - Lets put this into a function
-	/// Offset
-	err = binary.Write(tmpBuffer, binary.BigEndian, uint16(idx))
-	if err != nil {
-		return err
-	}
-	// Can use uint16 here - as maximum possible storage not in a blob - less than uint16
-	err = binary.Write(tmpBuffer, binary.BigEndian, uint16(size))
-	if err != nil {
-		return err
-	}
-	// Slot ID - unint32 - as we want to keep slot IDs unique regardless of compaction
-	// Allows a page to be written to 4 billion times
-	err = binary.Write(tmpBuffer, binary.BigEndian, lastID)
-	if err != nil {
-		return err
-	}
-	// Represents a tombstone
-	err = binary.Write(tmpBuffer, binary.BigEndian, uint8(0))
+	err = writeSlotInfo(tmpBuffer, uint16(idx), uint16(size), lastID, uint8(0))
 	if err != nil {
 		return err
 	}
@@ -404,24 +350,7 @@ func CompactPage(page []byte) ([]byte, bool, error) {
 		idx := rightIdx - int(slot.size)
 		copyRecord(int(slot.offset), idx, int(slot.size), page, newPage)
 		rightIdx = idx
-		// Offset
-		err = binary.Write(tmpBuffer, binary.BigEndian, uint16(rightIdx))
-		if err != nil {
-			return nil, false, err
-		}
-		// Can use uint16 here - as maximum possible storage not in a blob - less than uint16
-		err = binary.Write(tmpBuffer, binary.BigEndian, slot.size)
-		if err != nil {
-			return nil, false, err
-		}
-		// Slot ID - unint32 - as we want to keep slot IDs unique regardless of compaction
-		// Allows a page to be written to 4 billion times
-		err := binary.Write(tmpBuffer, binary.BigEndian, slot.slotID)
-		if err != nil {
-			return nil, false, err
-		}
-		// Represents a tombstone
-		err = binary.Write(tmpBuffer, binary.BigEndian, slot.tombstone)
+		err := writeSlotInfo(tmpBuffer, uint16(rightIdx), slot.size, slot.slotID, slot.tombstone)
 		if err != nil {
 			return nil, false, err
 		}
@@ -448,4 +377,29 @@ func calculatePageSize(items [][]byte) int {
 		size += len(item)
 	}
 	return size
+}
+
+func writeSlotInfo(buffer *bytes.Buffer, offset, size uint16, slotID uint32, tombstone uint8) error {
+	// Offset
+	err := binary.Write(buffer, binary.BigEndian, offset)
+	if err != nil {
+		return err
+	}
+	// Can use uint16 here - as maximum possible storage not in a blob - less than uint16
+	err = binary.Write(buffer, binary.BigEndian, size)
+	if err != nil {
+		return err
+	}
+	// Slot ID - unint32 - as we want to keep slot IDs unique regardless of compaction
+	// Allows a page to be written to 4 billion times
+	err = binary.Write(buffer, binary.BigEndian, slotID)
+	if err != nil {
+		return err
+	}
+	// Represents a tombstone
+	err = binary.Write(buffer, binary.BigEndian, tombstone)
+	if err != nil {
+		return err
+	}
+	return nil
 }
