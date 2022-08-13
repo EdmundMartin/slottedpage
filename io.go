@@ -1,12 +1,12 @@
 package slottedpage
 
 import (
+	"errors"
 	"fmt"
-	"io/ioutil"
+	"os"
 )
 
 type PageManager struct {
-	// TODO - Make below methods of this and rename
 	FileDirectory string
 }
 
@@ -17,31 +17,83 @@ func (p PageManager) fullPath(file string) string {
 	return fmt.Sprintf("%s/%s", p.FileDirectory, file)
 }
 
-func (p PageManager) ReadPageFromDisk(fileLocation string) (*Page, error) {
-	bytes, err := ioutil.ReadFile(p.fullPath(fileLocation))
+func (p PageManager) ReadFromDisk(filelocation string) (*PageInformation, error) {
+	fullpath := p.fullPath(filelocation)
+	if _, err := os.Stat(fullpath); errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	f, err := os.OpenFile(fullpath, os.O_CREATE|os.O_RDWR, os.ModePerm)
+	defer f.Close()
 	if err != nil {
 		return nil, err
 	}
-	return ReadSlottedPage(bytes)
+	return readPageNew(f)
 }
 
-func (p PageManager) WriteNewSlottedPage(filelocation string, items [][]byte) error {
-	page, err := NewSlottedPage(items)
-	if err != nil {
-		return err
+func (p PageManager) ReadSlotIDFromDisk(filelocation string, slotId int) (*PageInformation, error) {
+	fullpath := p.fullPath(filelocation)
+	if _, err := os.Stat(fullpath); errors.Is(err, os.ErrNotExist) {
+		return nil, err
 	}
-	// TODO - As our slotted pages are 4kb - we can use an atomic system call
-	return ioutil.WriteFile(p.fullPath(filelocation), page, 0666)
+	f, err := os.OpenFile(fullpath, os.O_CREATE|os.O_RDWR, os.ModePerm)
+	defer f.Close()
+	if err != nil {
+		return nil, err
+	}
+	return readPageAtSpecificSlot(f, slotId)
 }
 
-func (p PageManager) DeleteSlotByID(filelocation string, idx int) error {
-	bytes, err := ioutil.ReadFile(p.fullPath(filelocation))
+// TODO - This should return the slotID which the item was saved too
+func (p PageManager) WriteItemToPage(filelocation string, contents []byte) error {
+	fullpath := p.fullPath(filelocation)
+
+	if _, err := os.Stat(fullpath); errors.Is(err, os.ErrNotExist) {
+		if err := p.createEmptyPage(fullpath); err != nil {
+			return err
+		}
+	}
+
+	f, err := os.OpenFile(fullpath, os.O_CREATE|os.O_RDWR, os.ModePerm)
+	defer f.Close()
 	if err != nil {
 		return err
 	}
-	newPage, err := DeleteSlotItemByID(bytes, idx)
+	return writeItemToPage(f, contents)
+}
+
+func (p PageManager) DeleteSlotIDFromPage(filelocation string, id int) error {
+	fullpath := p.fullPath(filelocation)
+
+	if _, err := os.Stat(fullpath); errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	f, err := os.OpenFile(fullpath, os.O_CREATE|os.O_RDWR, os.ModePerm)
+	defer f.Close()
 	if err != nil {
 		return err
 	}
-	return ioutil.WriteFile(p.fullPath(filelocation), newPage, 0666)
+	if err := deleteItemAtSlotID(f, id); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p PageManager) createEmptyPage(fullpath string) error {
+
+	f, err := os.Create(fullpath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	emptyBytes := make([]byte, 4000)
+	if _, err := f.WriteAt(emptyBytes, 0); err != nil {
+		return err
+	}
+
+	if err := f.Sync(); err != nil {
+		return err
+	}
+
+	return nil
 }

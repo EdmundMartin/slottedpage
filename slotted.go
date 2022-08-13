@@ -1,9 +1,10 @@
 package slottedpage
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"os"
 )
 
 const (
@@ -15,390 +16,293 @@ const (
 	defaultPageSize = 4000
 )
 
-type Page struct {
-	CountItems int
-	Items      [][]byte
+// TODO
+// Reimplement compaction
+// Update value at slot
+
+type MetaData struct {
+	ItemCount uint8
+	LastID    uint32
+}
+
+func readHeadersFromFile(file *os.File) (*MetaData, error) {
+	itemCount, err := fileReadUint8At(file, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	id, err := fileReadUint32At(file, 1)
+	if err != nil {
+		return nil, err
+	}
+	m := &MetaData{
+		ItemCount: itemCount,
+		LastID:    id,
+	}
+	return m, nil
+}
+
+type Slot struct {
+	Offset    int
+	Size      int
+	SlotID    int
+	Tombstone bool
+	Item      []byte
+}
+
+type PageInformation struct {
+	MetaData   *MetaData
+	Slots      []*Slot
+	Items      int
 	Tombstones int
-	RawPage    []byte
 }
 
-func (p *Page) Size() int {
-	size := 1 + (len(p.Items) * 4)
-	for _, item := range p.Items {
-		size += len(item)
-	}
-	return size
-}
-
-func NewSlottedPage(items [][]byte) ([]byte, error) {
-	if len(items) > 255 {
-		// Item count is uint8 - allowing for 255 positive values
-		return nil, errors.New("max 255 items can be stored in single page")
-	}
-	diskUsage := calculatePageSize(items)
-	// TODO - If a single item is very large we should store in file blob
-	// TODO - The page would then simply store a pointer to the file blob to be loaded
-	// TODO - Check the disk size - assuming we are storing these large items in blob overflows
-	if diskUsage > defaultPageSize {
-		return nil, errors.New("items would overflow page size")
-	}
-	headerBytes, offsets, err := buildHeaders(items)
+func readPageAtSpecificSlot(file *os.File, slotID int) (*PageInformation, error) {
+	metaData, err := readHeadersFromFile(file)
 	if err != nil {
 		return nil, err
 	}
-	page := make([]byte, defaultPageSize)
-	writeBytesAt(page, 0, headerBytes)
-	for idx, item := range items {
-		writeBytesAt(page, offsets[idx], item)
-	}
-	return page, nil
-}
-
-type slotOffset struct {
-	offset    uint16
-	size      uint16
-	slotID    uint32
-	tombstone uint8
-}
-
-func ReadSlottedPage(page []byte) (*Page, error) {
-	reader := bytes.NewReader(page)
-	itemCount, err := readUint8At(reader, 0)
-	if err != nil {
-		return nil, err
-	}
-	offsets, err := readSlotInformation(reader, int(itemCount), metaDataLength)
-	if err != nil {
-		return nil, err
-	}
-	parsedPage := &Page{
-		CountItems: int(itemCount),
-		Items:      [][]byte{},
-		RawPage:    page,
+	slots, err := readSlotInfo(file, int(metaData.ItemCount))
+	pgInfo := &PageInformation{
+		MetaData:   metaData,
+		Slots:      []*Slot{},
+		Items:      0,
 		Tombstones: 0,
 	}
-	for _, off := range offsets {
-		if off.tombstone == 1 {
-			// Don't bother reading tomb stoned records
-			parsedPage.Tombstones += 1
-			parsedPage.CountItems -= 1
-			continue
+	for _, slot := range slots {
+		if slot.SlotID == slotID {
+			pgInfo.Items++
+			rawBytes := make([]byte, slot.Size)
+			_, err = file.ReadAt(rawBytes, int64(slot.Offset))
+			if err != nil {
+				return nil, err
+			}
+			slot.Item = rawBytes
+			pgInfo.Slots = append(pgInfo.Slots, slot)
 		}
-		rawBytes, err := readNBytesAt(reader, int64(off.offset), int(off.size))
-		if err != nil {
-			return nil, err
-		}
-		parsedPage.Items = append(parsedPage.Items, rawBytes)
 	}
-	return parsedPage, nil
+	return pgInfo, nil
 }
 
-func readNBytesAt(reader *bytes.Reader, offset int64, size int) ([]byte, error) {
-	store := make([]byte, size)
-	_, err := reader.ReadAt(store, offset)
-	return store, err
-}
-
-func readUint32At(reader *bytes.Reader, offset int64) (uint32, error) {
-	data, err := readNBytesAt(reader, offset, uint32Length)
-	if err != nil {
-		return 0, err
-	}
-	var result uint32
-	dataReader := bytes.NewReader(data)
-	err = binary.Read(dataReader, binary.BigEndian, &result)
-	if err != nil {
-		return 0, err
-	}
-	return result, err
-}
-
-func writeUint32At(page []byte, number uint32, offset int64) error {
-	tmpBuffer := new(bytes.Buffer)
-	err := binary.Write(tmpBuffer, binary.BigEndian, number)
-	if err != nil {
-		return err
-	}
-	copyRecord(0, int(offset), 4, tmpBuffer.Bytes(), page)
-	return nil
-}
-
-func readUint16At(reader *bytes.Reader, offset int64) (uint16, error) {
-	data, err := readNBytesAt(reader, offset, uint16Length)
-	if err != nil {
-		return 0, err
-	}
-	var result uint16
-	dataReader := bytes.NewReader(data)
-	err = binary.Read(dataReader, binary.BigEndian, &result)
-	if err != nil {
-		return 0, err
-	}
-	return result, err
-}
-
-func readUint8At(reader *bytes.Reader, offset int64) (uint8, error) {
-	data, err := readNBytesAt(reader, offset, 1)
-	if err != nil {
-		return 0, err
-	}
-	var result uint8
-	dataReader := bytes.NewReader(data)
-	err = binary.Read(dataReader, binary.BigEndian, &result)
-	if err != nil {
-		return 0, err
-	}
-	return result, err
-}
-
-func readSlotInformation(page *bytes.Reader, itemCount int, startingOffset int64) ([]slotOffset, error) {
-	var slotOffsets []slotOffset
-	for i := 0; i < itemCount; i++ {
-		loc, err := readUint16At(page, startingOffset)
-		if err != nil {
-			return slotOffsets, err
-		}
-		startingOffset += uint16Length
-		size, err := readUint16At(page, startingOffset)
-		if err != nil {
-			return slotOffsets, err
-		}
-		startingOffset += uint16Length
-
-		slotID, err := readUint32At(page, startingOffset)
-		if err != nil {
-			return nil, err
-		}
-		startingOffset += uint32Length
-
-		tombstone, err := readUint8At(page, startingOffset)
-		if err != nil {
-			return slotOffsets, err
-		}
-		startingOffset += uint8Length
-		slotOffsets = append(slotOffsets, slotOffset{
-			offset:    loc,
-			size:      size,
-			slotID:    slotID,
-			tombstone: tombstone,
-		})
-	}
-	return slotOffsets, nil
-}
-
-func writeBytesAt(page []byte, offsetIdx int, toWrite []byte) {
-	for i := 0; i < len(toWrite); i++ {
-		page[offsetIdx+i] = toWrite[i]
-	}
-}
-
-func buildHeaders(items [][]byte) ([]byte, []int, error) {
-	buffer := new(bytes.Buffer)
-	// Count items
-	err := binary.Write(buffer, binary.BigEndian, uint8(len(items)))
-	if err != nil {
-		return nil, nil, err
-	}
-	// Slot ID counter
-	err = binary.Write(buffer, binary.BigEndian, uint32(len(items)))
-	if err != nil {
-		return nil, nil, err
-	}
-
-	startingIdx := 4000
-	var offsets []int
-	for idx, item := range items {
-		size := len(item)
-		offset := startingIdx - size
-		err := writeSlotInfo(buffer, uint16(offset), uint16(size), uint32(idx), 0)
-		if err != nil {
-			return nil, nil, err
-		}
-		startingIdx = offset
-		offsets = append(offsets, offset)
-	}
-	return buffer.Bytes(), offsets, nil
-}
-
-func DeleteSlotItemByID(page []byte, id int) ([]byte, error) {
-	itemCount := int(page[0])
-	reader := bytes.NewReader(page)
-	slots, err := readSlotInformation(reader, itemCount, metaDataLength)
+func readPageNew(file *os.File) (*PageInformation, error) {
+	metaData, err := readHeadersFromFile(file)
 	if err != nil {
 		return nil, err
 	}
+	slots, err := readSlotInfo(file, int(metaData.ItemCount))
 
-	// TODO - Let's do binary search
-	slotIdx := -1
-	for idx, slot := range slots {
-		if int(slot.slotID) == id {
-			slotIdx = idx
+	pgInfo := &PageInformation{
+		MetaData:   metaData,
+		Slots:      slots,
+		Items:      0,
+		Tombstones: 0,
+	}
+	for _, slot := range slots {
+		if slot.Tombstone {
+			pgInfo.Tombstones++
+			continue
 		}
+		pgInfo.Items++
+		rawBytes := make([]byte, slot.Size)
+		_, err = file.ReadAt(rawBytes, int64(slot.Offset))
+		if err != nil {
+			return nil, err
+		}
+		slot.Item = rawBytes
 	}
-	if slotIdx < 0 {
-		return nil, errors.New("slot id is not contained within the page")
-	}
-	var byteToMod int
-	if slotIdx == 0 {
-		byteToMod = metaDataLength + (slotInfoSize - 1)
-	} else {
-		byteToMod = metaDataLength + (slotInfoSize * slotIdx) + (slotInfoSize - 1)
-	}
-	page[byteToMod] = 1
-	return page, nil
+	return pgInfo, nil
 }
 
-func UpdateItemWithSlotID(page []byte, slotID int, item []byte) {
-	// TODO - Given page bytes and idx update item at idx
-	return
-}
+func fileReadUint16At(file *os.File, offset int64) (uint16, error) {
+	store := make([]byte, 2)
 
-func WriteItemToPage(page []byte, item []byte) error {
-	// TODO - Given page bytes - write item to existing page
-	itemCount := int(page[0])
-	reader := bytes.NewReader(page)
-
-	lastID, err := readUint32At(reader, 1)
+	_, err := file.ReadAt(store, offset)
 	if err != nil {
-		return err
+		return 0, err
+	}
+	return binary.BigEndian.Uint16(store), nil
+}
+
+func fileReadUint32At(file *os.File, offset int64) (uint32, error) {
+	store := make([]byte, 4)
+
+	_, err := file.ReadAt(store, offset)
+	if err != nil {
+		return 0, err
+	}
+	return binary.BigEndian.Uint32(store), nil
+}
+
+func fileReadUint8At(file *os.File, offset int64) (uint8, error) {
+	store := make([]byte, 1)
+	_, err := file.ReadAt(store, offset)
+	if err != nil {
+		return 0, err
+	}
+	return store[0], nil
+}
+
+func readSlotInfo(file *os.File, itemCount int) ([]*Slot, error) {
+	var slotInfo []*Slot
+	pos := int64(metaDataLength)
+	for i := 0; i < itemCount; i++ {
+
+		offset, err := fileReadUint16At(file, pos)
+		if err != nil {
+			return nil, err
+		}
+		pos += 2
+
+		size, err := fileReadUint16At(file, pos)
+		if err != nil {
+			return nil, err
+		}
+		pos += 2
+
+		slotID, err := fileReadUint32At(file, pos)
+		if err != nil {
+			return nil, err
+		}
+		pos += 4
+
+		tombstone, err := fileReadUint8At(file, pos)
+
+		pos += 1
+		slotInfo = append(slotInfo, &Slot{
+			Offset:    int(offset),
+			Size:      int(size),
+			SlotID:    int(slotID),
+			Tombstone: tombstone == 1,
+		})
 	}
 
-	if itemCount == 0 {
-		pageSize := calculatePageSize([][]byte{item})
-		if pageSize > defaultPageSize {
-			// TODO - Lets handle blobs
-			return errors.New("not enough space to write item to page")
-		}
-		tmpBuffer := new(bytes.Buffer)
-		size := len(item)
-		idx := defaultPageSize - size
-		copyRecord(0, idx, size, item, page)
-		err = writeSlotInfo(tmpBuffer, uint16(idx), uint16(size), lastID, 0)
-		if err != nil {
-			return err
-		}
-		writeBytesAt(page, metaDataLength, tmpBuffer.Bytes())
+	return slotInfo, nil
+}
 
-		page[0] = 1
-		lastID += 1
-		err = writeUint32At(page, lastID, 1)
-		if err != nil {
-			return err
-		}
-
+func deleteItemAtSlotID(file *os.File, slotID int) error {
+	metaData, err := readHeadersFromFile(file)
+	if uint32(slotID) > metaData.LastID {
 		return nil
 	}
-
-	slots, err := readSlotInformation(reader, itemCount, metaDataLength)
-	finalSlot := slots[len(slots)-1]
-	space := int(finalSlot.offset) - (metaDataLength + (itemCount * slotInfoSize) + slotInfoSize)
-	if len(item) > space {
-		return errors.New("not enough space to write into page")
-	}
-	tmpBuffer := new(bytes.Buffer)
-	size := len(item)
-	idx := int(finalSlot.offset) - size
-	copyRecord(0, idx, size, item, page)
-
-	err = writeSlotInfo(tmpBuffer, uint16(idx), uint16(size), lastID, uint8(0))
+	slots, err := readSlotInfo(file, int(metaData.ItemCount))
+	fmt.Println(slots, err)
 	if err != nil {
 		return err
 	}
-	startIdx := metaDataLength + (itemCount * slotInfoSize)
-	copyRecord(0, startIdx, slotInfoSize, tmpBuffer.Bytes(), page)
-	page[0] += 1
-	lastID += 1
-	err = writeUint32At(page, lastID, 1)
+
+	foundIdx := -1
+	for idx, slot := range slots {
+		if slot.SlotID == slotID {
+			foundIdx = idx
+		}
+	}
+	if foundIdx >= 0 {
+		var tombstoneByte int
+		if foundIdx == 0 {
+			tombstoneByte = metaDataLength + slotInfoSize - 1
+		} else {
+			tombstoneByte = metaDataLength + (slotInfoSize * foundIdx) + (slotInfoSize - 1)
+		}
+		_, err := file.WriteAt([]byte{1}, int64(tombstoneByte))
+		if err != nil {
+			return err
+		}
+	}
+
+	if err := file.Sync(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func writeItemToPage(file *os.File, item []byte) error {
+	metaData, err := readHeadersFromFile(file)
 	if err != nil {
+		return err
+	}
+	var lastOffset int
+	var off uint16
+	if metaData.ItemCount == 0 {
+		lastOffset = metaDataLength
+		off = defaultPageSize
+	} else {
+		lastOffset = int(metaData.ItemCount)*slotInfoSize - slotInfoSize + metaDataLength
+		offset := make([]byte, 2)
+		_, err = file.ReadAt(offset, int64(lastOffset))
+		if err != nil {
+			return err
+		}
+		off = binary.BigEndian.Uint16(offset)
+		hasSpace := int(off) - (metaDataLength + (int(metaData.ItemCount) * slotInfoSize))
+		if len(item) > hasSpace {
+			return errors.New("not enough space")
+		}
+	}
+
+	newOffset := int(off) - len(item)
+	_, err = file.WriteAt(item, int64(newOffset))
+	if err != nil {
+		return err
+	}
+	// Update item count
+	_, err = file.WriteAt([]byte{metaData.ItemCount + 1}, 0)
+
+	newSlotLoc := (slotInfoSize * int(metaData.ItemCount)) + metaDataLength
+	err = writeSlotInfoToFile(file, int64(newSlotLoc), uint16(newOffset), uint16(len(item)), metaData.LastID, 0)
+	if err != nil {
+		return err
+	}
+	lastIDBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(lastIDBytes, metaData.LastID+1)
+	_, err = file.WriteAt(lastIDBytes, 1)
+	if err != nil {
+		return err
+	}
+
+	if err := file.Sync(); err != nil {
 		return err
 	}
 	return nil
 }
 
-func CompactPage(page []byte) ([]byte, bool, error) {
-	countItems := int(page[0])
-	reader := bytes.NewReader(page)
-	slots, err := readSlotInformation(reader, countItems, metaDataLength)
-	if err != nil {
-		return nil, false, err
-	}
-	tombstoned := 0
-	var slotsToKeep []slotOffset
-	for _, slot := range slots {
-		if slot.tombstone == 1 {
-			tombstoned += 1
-			continue
-		}
-		slotsToKeep = append(slotsToKeep, slot)
-	}
-	if tombstoned == 0 {
-		return page, false, nil
-	}
-	if len(slotsToKeep) == 0 {
-		// If page has only tombstoned records we can delete the page from disk
-		return nil, true, nil
-	}
-	newPage := make([]byte, defaultPageSize)
-	// Count items will be the count of non tombstoned items
-	newPage[0] = uint8(len(slotsToKeep))
-	// Copy the slot ID count over - so systems accessing our page can still access items by slot ID
-	// despite the disk location having changed
-	copyByteRange(uint8Length, 4, page, newPage)
-	rightIdx := defaultPageSize
-	tmpBuffer := new(bytes.Buffer)
-	for _, slot := range slotsToKeep {
-		idx := rightIdx - int(slot.size)
-		copyRecord(int(slot.offset), idx, int(slot.size), page, newPage)
-		rightIdx = idx
-		err := writeSlotInfo(tmpBuffer, uint16(rightIdx), slot.size, slot.slotID, slot.tombstone)
-		if err != nil {
-			return nil, false, err
-		}
-	}
-	writeBytesAt(newPage, metaDataLength, tmpBuffer.Bytes())
-	return newPage, false, err
-}
-
-func copyRecord(oldStart, newStart, size int, src, dst []byte) {
-	for i := 0; i < size; i++ {
-		dst[newStart+i] = src[oldStart+i]
-	}
-}
-
-func copyByteRange(startIdx int, count int, src, dst []byte) {
-	for i := 0; i < count; i++ {
-		dst[startIdx+i] = src[startIdx+i]
-	}
-}
-
-func calculatePageSize(items [][]byte) int {
-	size := metaDataLength + (slotInfoSize * len(items))
-	for _, item := range items {
-		size += len(item)
-	}
-	return size
-}
-
-func writeSlotInfo(buffer *bytes.Buffer, offset, size uint16, slotID uint32, tombstone uint8) error {
-	// Offset
-	err := binary.Write(buffer, binary.BigEndian, offset)
-	if err != nil {
+func writeUint16At(file *os.File, pos int64, value uint16) error {
+	dataToWrite := make([]byte, uint16Length)
+	binary.BigEndian.PutUint16(dataToWrite, value)
+	if _, err := file.WriteAt(dataToWrite, pos); err != nil {
 		return err
 	}
-	// Can use uint16 here - as maximum possible storage not in a blob - less than uint16
-	err = binary.Write(buffer, binary.BigEndian, size)
-	if err != nil {
+	return nil
+}
+
+func writeUint32At(file *os.File, pos int64, value uint32) error {
+	dataToWrite := make([]byte, uint32Length)
+	binary.BigEndian.PutUint32(dataToWrite, value)
+	if _, err := file.WriteAt(dataToWrite, pos); err != nil {
 		return err
 	}
-	// Slot ID - unint32 - as we want to keep slot IDs unique regardless of compaction
-	// Allows a page to be written to 4 billion times
-	err = binary.Write(buffer, binary.BigEndian, slotID)
-	if err != nil {
+	return nil
+}
+
+func writeSlotInfoToFile(f *os.File, pos int64, offset, size uint16, slotID uint32, tombstone uint8) error {
+	if err := writeUint16At(f, pos, offset); err != nil {
 		return err
 	}
-	// Represents a tombstone
-	err = binary.Write(buffer, binary.BigEndian, tombstone)
-	if err != nil {
+
+	pos += uint16Length
+
+	if err := writeUint16At(f, pos, size); err != nil {
+		return err
+	}
+
+	pos += uint16Length
+
+	if err := writeUint32At(f, pos, slotID); err != nil {
+		return err
+	}
+	pos += uint32Length
+
+	if _, err := f.WriteAt([]byte{tombstone}, pos); err != nil {
 		return err
 	}
 	return nil
