@@ -2,6 +2,7 @@ package slottedpage
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"reflect"
 	"testing"
@@ -45,7 +46,9 @@ func TestReadAndWriteSlottedPage(t *testing.T) {
 	dataOne := []string{"something", "fun"}
 	b, _ := json.Marshal(dataOne)
 
-	err := WriteNewSlottedPage("test_page", [][]byte{b})
+	m := PageManager{}
+
+	err := m.WriteNewSlottedPage("test_page", [][]byte{b})
 	defer func() {
 		os.Remove("test_page")
 	}()
@@ -53,7 +56,7 @@ func TestReadAndWriteSlottedPage(t *testing.T) {
 		t.Errorf("expected no error")
 	}
 
-	p, err := ReadPageFromDisk("test_page")
+	p, err := m.ReadPageFromDisk("test_page")
 	var resultOne []string
 	json.Unmarshal(p.Items[0], &resultOne)
 
@@ -63,7 +66,7 @@ func TestReadAndWriteSlottedPage(t *testing.T) {
 
 }
 
-func TestDeleteItemAtIndex_AtIndexZero(t *testing.T) {
+func TestDeleteItemAtIndex_AtSlotIDZero(t *testing.T) {
 
 	dataOne := []string{"something", "fun"}
 	b, _ := json.Marshal(dataOne)
@@ -73,7 +76,7 @@ func TestDeleteItemAtIndex_AtIndexZero(t *testing.T) {
 		t.Errorf("expected no error")
 	}
 
-	page, err = DeleteItemAtIndex(page, 0)
+	page, err = DeleteSlotItemByID(page, 0)
 
 	result, err := ReadSlottedPage(page)
 	if err != nil {
@@ -99,7 +102,7 @@ func TestDeleteItemAtIndex_AtNonZeroIndex(t *testing.T) {
 		t.Errorf("expected no error")
 	}
 
-	page, err = DeleteItemAtIndex(page, 1)
+	page, err = DeleteSlotItemByID(page, 1)
 	if err != nil {
 		t.Errorf("expected no error")
 	}
@@ -126,6 +129,75 @@ func TestDeleteItemAtIndex_AtNonZeroIndex(t *testing.T) {
 	}
 }
 
-func TestDeleteItemAtIndex_NoSuchIndex(t *testing.T) {
+func TestDeleteItemAtIndex_NoSuchId(t *testing.T) {
 
+}
+
+func TestCompactPage(t *testing.T) {
+	dataOne := []byte("hello world")
+	dataTwo := []byte("Привет мир")
+	dataThree := []byte("hola amigo")
+
+	page, err := NewSlottedPage([][]byte{dataOne, dataTwo, dataThree})
+
+	if err != nil {
+		t.Errorf("expected no error")
+	}
+
+	// Delete the contents of the middle slot
+	page, err = DeleteSlotItemByID(page, 1)
+	if err != nil {
+		t.Errorf("expected no error")
+	}
+
+	newPage, canDelete, err := CompactPage(page)
+
+	if canDelete == true {
+		t.Error("page cannot be deleted, as there are non tombstoned records")
+	}
+
+	p, err := ReadSlottedPage(newPage)
+	if p.CountItems != 2 {
+		t.Errorf("unpexted item count, expected 2, got %d", p.Items)
+	}
+
+	if string(dataOne) != string(p.Items[0]) {
+		t.Errorf("expected the same string values")
+	}
+
+	if string(dataThree) != string(p.Items[1]) {
+		t.Errorf("expected the same string values")
+	}
+}
+
+func TestCanWriteValueToExistingPage(t *testing.T) {
+	dataOne := []byte("hello world")
+	dataTwo := []byte("Привет мир")
+	dataThree := []byte("hola amigo")
+
+	page, err := NewSlottedPage([][]byte{dataOne, dataTwo, dataThree})
+	if err != nil {
+		t.Error("expected no error")
+	}
+
+	err = WriteItemToPage(page, []byte("Ronald McDonald"))
+	fmt.Println(err)
+
+	p, err := ReadSlottedPage(page)
+
+	if p.CountItems != 4 {
+		t.Errorf("expected 4 items got, %d", p.CountItems)
+	}
+
+	expected := []string{
+		"hello world",
+		"Привет мир",
+		"hola amigo",
+		"Ronald McDonald",
+	}
+	for idx, item := range p.Items {
+		if expected[idx] != string(item) {
+			t.Errorf("unexpected value at idx: %d, got %s, expected %s", idx, string(item), expected[idx])
+		}
+	}
 }
