@@ -3,7 +3,6 @@ package slottedpage
 import (
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"os"
 )
 
@@ -69,18 +68,21 @@ func readPageAtSpecificSlot(file *os.File, slotID int) (*PageInformation, error)
 		Items:      0,
 		Tombstones: 0,
 	}
-	for _, slot := range slots {
-		if slot.SlotID == slotID {
-			pgInfo.Items++
-			rawBytes := make([]byte, slot.Size)
-			_, err = file.ReadAt(rawBytes, int64(slot.Offset))
-			if err != nil {
-				return nil, err
-			}
-			slot.Item = rawBytes
-			pgInfo.Slots = append(pgInfo.Slots, slot)
-		}
+	slotIdx := slotBinarySearch(slots, 0, len(slots)-1, slotID)
+	if slotIdx < 0 {
+		return nil, errors.New("no such slot in page")
 	}
+	pgInfo.Items++
+	targetSlot := slots[slotIdx]
+	rawBytes := make([]byte, targetSlot.Size)
+
+	_, err = file.ReadAt(rawBytes, int64(targetSlot.Offset))
+	if err != nil {
+		return nil, err
+	}
+
+	targetSlot.Item = rawBytes
+	pgInfo.Slots = append(pgInfo.Slots, targetSlot)
 	return pgInfo, nil
 }
 
@@ -151,23 +153,23 @@ func readSlotInfo(file *os.File, itemCount int) ([]*Slot, error) {
 		if err != nil {
 			return nil, err
 		}
-		pos += 2
+		pos += uint16Length
 
 		size, err := fileReadUint16At(file, pos)
 		if err != nil {
 			return nil, err
 		}
-		pos += 2
+		pos += uint16Length
 
 		slotID, err := fileReadUint32At(file, pos)
 		if err != nil {
 			return nil, err
 		}
-		pos += 4
+		pos += uint32Length
 
 		tombstone, err := fileReadUint8At(file, pos)
 
-		pos += 1
+		pos += uint8Length
 		slotInfo = append(slotInfo, &Slot{
 			Offset:    int(offset),
 			Size:      int(size),
@@ -179,13 +181,19 @@ func readSlotInfo(file *os.File, itemCount int) ([]*Slot, error) {
 	return slotInfo, nil
 }
 
+func calculateTombstoneByte(idx int) int {
+	if idx == 0 {
+		return metaDataLength + slotInfoSize - 1
+	}
+	return metaDataLength + (slotInfoSize * idx) + (slotInfoSize - 1)
+}
+
 func deleteItemAtSlotID(file *os.File, slotID int) error {
 	metaData, err := readHeadersFromFile(file)
 	if uint32(slotID) > metaData.LastID {
 		return nil
 	}
 	slots, err := readSlotInfo(file, int(metaData.ItemCount))
-	fmt.Println(slots, err)
 	if err != nil {
 		return err
 	}
@@ -196,17 +204,14 @@ func deleteItemAtSlotID(file *os.File, slotID int) error {
 			foundIdx = idx
 		}
 	}
-	if foundIdx >= 0 {
-		var tombstoneByte int
-		if foundIdx == 0 {
-			tombstoneByte = metaDataLength + slotInfoSize - 1
-		} else {
-			tombstoneByte = metaDataLength + (slotInfoSize * foundIdx) + (slotInfoSize - 1)
-		}
-		_, err := file.WriteAt([]byte{1}, int64(tombstoneByte))
-		if err != nil {
-			return err
-		}
+	// Slot with the ID is not found in the page simply return
+	if foundIdx == -1 {
+		return nil
+	}
+	tombstoneLocation := calculateTombstoneByte(foundIdx)
+	_, err = file.WriteAt([]byte{1}, int64(tombstoneLocation))
+	if err != nil {
+		return err
 	}
 
 	if err := file.Sync(); err != nil {
@@ -253,9 +258,8 @@ func writeItemToPage(file *os.File, item []byte) error {
 	if err != nil {
 		return err
 	}
-	lastIDBytes := make([]byte, 4)
-	binary.BigEndian.PutUint32(lastIDBytes, metaData.LastID+1)
-	_, err = file.WriteAt(lastIDBytes, 1)
+
+	err = writeUint32At(file, 1, metaData.LastID+1)
 	if err != nil {
 		return err
 	}

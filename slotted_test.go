@@ -153,7 +153,7 @@ func TestPageManager_ReadSlotIDFromDisk(t *testing.T) {
 	if err != nil {
 		t.Error("expected no error")
 	}
-	fmt.Println(result.Slots[0].Item)
+
 	if string(result.Slots[0].Item) != "john" {
 		t.Errorf("got unexpected value")
 	}
