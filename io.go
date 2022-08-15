@@ -3,6 +3,7 @@ package slottedpage
 import (
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"os"
 )
 
@@ -43,14 +44,28 @@ func (p PageManager) ReadSlotIDFromDisk(filelocation string, slotId int) (*PageI
 	return readPageAtSpecificSlot(f, slotId)
 }
 
-// TODO - This should return the slotID which the item was saved too
-func (p PageManager) WriteItemToPage(filelocation string, contents []byte) error {
+func (p PageManager) WriteItemToPage(filelocation string, contents []byte) (int, error) {
 	fullpath := p.fullPath(filelocation)
 
 	if _, err := os.Stat(fullpath); errors.Is(err, os.ErrNotExist) {
 		if err := p.createEmptyPage(fullpath); err != nil {
-			return err
+			return -1, err
 		}
+	}
+
+	f, err := os.OpenFile(fullpath, os.O_CREATE|os.O_RDWR, os.ModePerm)
+	defer f.Close()
+	if err != nil {
+		return -1, err
+	}
+	return writeItemToPage(f, contents)
+}
+
+func (p PageManager) UpdateItem(filelocation string, slotID int, contents []byte) error {
+	fullpath := p.fullPath(filelocation)
+
+	if _, err := os.Stat(fullpath); errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 
 	f, err := os.OpenFile(fullpath, os.O_CREATE|os.O_RDWR, os.ModePerm)
@@ -58,7 +73,8 @@ func (p PageManager) WriteItemToPage(filelocation string, contents []byte) error
 	if err != nil {
 		return err
 	}
-	return writeItemToPage(f, contents)
+
+	return updateItem(f, slotID, contents)
 }
 
 func (p PageManager) DeleteSlotIDFromPage(filelocation string, id int) error {
@@ -96,4 +112,9 @@ func (p PageManager) createEmptyPage(fullpath string) error {
 	}
 
 	return nil
+}
+
+func (p PageManager) ReadRawBytes(filelocation string) ([]byte, error) {
+	fullpath := p.fullPath(filelocation)
+	return ioutil.ReadFile(fullpath)
 }

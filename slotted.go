@@ -42,6 +42,7 @@ func readHeadersFromFile(file *os.File) (*MetaData, error) {
 }
 
 type Slot struct {
+	Idx       int
 	Offset    int
 	Size      int
 	SlotID    int
@@ -168,9 +169,13 @@ func readSlotInfo(file *os.File, itemCount int) ([]*Slot, error) {
 		pos += uint32Length
 
 		tombstone, err := fileReadUint8At(file, pos)
+		if err != nil {
+			return nil, err
+		}
 
 		pos += uint8Length
 		slotInfo = append(slotInfo, &Slot{
+			Idx:       i,
 			Offset:    int(offset),
 			Size:      int(size),
 			SlotID:    int(slotID),
@@ -198,12 +203,8 @@ func deleteItemAtSlotID(file *os.File, slotID int) error {
 		return err
 	}
 
-	foundIdx := -1
-	for idx, slot := range slots {
-		if slot.SlotID == slotID {
-			foundIdx = idx
-		}
-	}
+	foundIdx := slotBinarySearch(slots, 0, len(slots)-1, slotID)
+
 	// Slot with the ID is not found in the page simply return
 	if foundIdx == -1 {
 		return nil
@@ -221,10 +222,109 @@ func deleteItemAtSlotID(file *os.File, slotID int) error {
 	return nil
 }
 
-func writeItemToPage(file *os.File, item []byte) error {
+func compactPageUpdate(file *os.File, slotId int, newBytesVale []byte) error {
 	metaData, err := readHeadersFromFile(file)
 	if err != nil {
 		return err
+	}
+
+	slots, err := readSlotInfo(file, int(metaData.ItemCount))
+
+	for _, slot := range slots {
+		if slot.SlotID == slotId {
+			slot.Item = newBytesVale
+			slot.Size = len(newBytesVale)
+		} else {
+			bytes := make([]byte, slot.Size)
+			_, err := file.ReadAt(bytes, int64(slot.Offset))
+			if err != nil {
+				return err
+			}
+			slot.Item = bytes
+		}
+	}
+	startLeft := metaDataLength
+	startRight := defaultPageSize
+
+	for _, slot := range slots {
+		if slot.Tombstone {
+			continue
+		}
+		offset := startRight - slot.Size
+
+		err = writeSlotInfoToFile(file, int64(startLeft), uint16(offset), uint16(slot.Size), uint32(slot.SlotID), 0)
+		if err != nil {
+			return err
+		}
+		startLeft += slotInfoSize
+
+		_, err = file.WriteAt(slot.Item, int64(offset))
+		if err != nil {
+			return err
+		}
+		startRight = offset
+	}
+
+	return nil
+}
+
+func updateItem(file *os.File, targetSlotID int, item []byte) error {
+
+	pgInfo, err := readPageAtSpecificSlot(file, targetSlotID)
+	if err != nil {
+		return err
+	}
+
+	// If found will always be Idx zero
+	slot := pgInfo.Slots[0]
+
+	if slot.Size == len(item) {
+		_, err = file.WriteAt(item, int64(slot.Offset))
+		if err != nil {
+			return err
+		}
+		err = file.Sync()
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+
+	if len(item) <= slot.Size {
+		_, err = file.WriteAt(item, int64(slot.Offset))
+		if err != nil {
+			return err
+		}
+
+		sizeOffset := calculateSizeByteOffset(slot.Idx)
+
+		err = writeUint16At(file, sizeOffset, uint16(len(item)))
+		if err != nil {
+			return err
+		}
+
+		err = file.Sync()
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+
+	if err := compactPageUpdate(file, targetSlotID, item); err != nil {
+		return err
+	}
+
+	if err := file.Sync(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func writeItemToPage(file *os.File, item []byte) (int, error) {
+	metaData, err := readHeadersFromFile(file)
+	if err != nil {
+		return -1, err
 	}
 	var lastOffset int
 	var off uint16
@@ -236,19 +336,19 @@ func writeItemToPage(file *os.File, item []byte) error {
 		offset := make([]byte, 2)
 		_, err = file.ReadAt(offset, int64(lastOffset))
 		if err != nil {
-			return err
+			return -1, err
 		}
 		off = binary.BigEndian.Uint16(offset)
 		hasSpace := int(off) - (metaDataLength + (int(metaData.ItemCount) * slotInfoSize))
 		if len(item) > hasSpace {
-			return errors.New("not enough space")
+			return -1, errors.New("not enough space")
 		}
 	}
 
 	newOffset := int(off) - len(item)
 	_, err = file.WriteAt(item, int64(newOffset))
 	if err != nil {
-		return err
+		return -1, err
 	}
 	// Update item count
 	_, err = file.WriteAt([]byte{metaData.ItemCount + 1}, 0)
@@ -256,18 +356,18 @@ func writeItemToPage(file *os.File, item []byte) error {
 	newSlotLoc := (slotInfoSize * int(metaData.ItemCount)) + metaDataLength
 	err = writeSlotInfoToFile(file, int64(newSlotLoc), uint16(newOffset), uint16(len(item)), metaData.LastID, 0)
 	if err != nil {
-		return err
+		return -1, err
 	}
 
 	err = writeUint32At(file, 1, metaData.LastID+1)
 	if err != nil {
-		return err
+		return -1, err
 	}
 
 	if err := file.Sync(); err != nil {
-		return err
+		return -1, err
 	}
-	return nil
+	return int(metaData.LastID), nil
 }
 
 func writeUint16At(file *os.File, pos int64, value uint16) error {
@@ -310,4 +410,11 @@ func writeSlotInfoToFile(f *os.File, pos int64, offset, size uint16, slotID uint
 		return err
 	}
 	return nil
+}
+
+func calculateSizeByteOffset(idx int) int64 {
+	if idx == 0 {
+		return int64(metaDataLength + slotInfoSize - 7)
+	}
+	return int64(metaDataLength + (slotInfoSize * idx) + slotInfoSize - 7)
 }
