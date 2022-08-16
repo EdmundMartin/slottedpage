@@ -24,6 +24,22 @@ type MetaData struct {
 	LastID    uint32
 }
 
+type Slot struct {
+	Idx       int
+	Offset    int
+	Size      int
+	SlotID    int
+	Tombstone bool
+	Item      []byte
+}
+
+type PageInformation struct {
+	MetaData   *MetaData
+	Slots      []*Slot
+	Items      int
+	Tombstones int
+}
+
 func readHeadersFromFile(file *os.File) (*MetaData, error) {
 	itemCount, err := fileReadUint8At(file, 0)
 	if err != nil {
@@ -39,22 +55,6 @@ func readHeadersFromFile(file *os.File) (*MetaData, error) {
 		LastID:    id,
 	}
 	return m, nil
-}
-
-type Slot struct {
-	Idx       int
-	Offset    int
-	Size      int
-	SlotID    int
-	Tombstone bool
-	Item      []byte
-}
-
-type PageInformation struct {
-	MetaData   *MetaData
-	Slots      []*Slot
-	Items      int
-	Tombstones int
 }
 
 func readPageAtSpecificSlot(file *os.File, slotID int) (*PageInformation, error) {
@@ -219,6 +219,49 @@ func deleteItemAtSlotID(file *os.File, slotID int) error {
 		return err
 	}
 
+	return nil
+}
+
+func compactPage(file *os.File) error {
+	metaData, err := readHeadersFromFile(file)
+	if err != nil {
+		return err
+	}
+
+	slots, err := readSlotInfo(file, int(metaData.ItemCount))
+	if err != nil {
+		return err
+	}
+
+	for _, slot := range slots {
+		bytes := make([]byte, slot.Size)
+		if _, err = file.ReadAt(bytes, int64(slot.Offset)); err != nil {
+			return err
+		}
+		slot.Item = bytes
+	}
+
+	startLeft := metaDataLength
+	startRight := defaultPageSize
+
+	for _, slot := range slots {
+		if slot.Tombstone {
+			continue
+		}
+		offset := startRight - slot.Size
+
+		err = writeSlotInfoToFile(file, int64(startLeft), uint16(offset), uint16(slot.Size), uint32(slot.SlotID), 0)
+		if err != nil {
+			return err
+		}
+		startLeft += slotInfoSize
+
+		_, err = file.WriteAt(slot.Item, int64(offset))
+		if err != nil {
+			return err
+		}
+		startRight = offset
+	}
 	return nil
 }
 

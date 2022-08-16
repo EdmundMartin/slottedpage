@@ -95,6 +95,30 @@ func (p PageManager) DeleteSlotIDFromPage(filelocation string, id int) error {
 	return nil
 }
 
+func (p PageManager) ReadRawBytes(filelocation string) ([]byte, error) {
+	fullpath := p.fullPath(filelocation)
+	return ioutil.ReadFile(fullpath)
+}
+
+func (p PageManager) CompactPage(filelocation string) error {
+	fullpath := p.fullPath(filelocation)
+
+	if _, err := os.Stat(fullpath); errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	f, err := os.OpenFile(fullpath, os.O_CREATE|os.O_RDWR, os.ModePerm)
+	defer f.Close()
+	if err != nil {
+		return err
+	}
+
+	if err := compactPage(f); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (p PageManager) createEmptyPage(fullpath string) error {
 
 	f, err := os.Create(fullpath)
@@ -112,9 +136,4 @@ func (p PageManager) createEmptyPage(fullpath string) error {
 	}
 
 	return nil
-}
-
-func (p PageManager) ReadRawBytes(filelocation string) ([]byte, error) {
-	fullpath := p.fullPath(filelocation)
-	return ioutil.ReadFile(fullpath)
 }
